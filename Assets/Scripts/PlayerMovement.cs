@@ -22,6 +22,14 @@ public class PlayerController : MonoBehaviour, IDamageable
     public float damageFlashDuration = 0.1f;
     public Color damageFlashColor = Color.red;
     
+    [Header("Breath/Stamina System")]
+    public float maxBreath = 100f;
+    public float breathDrainRate = 25f; // How fast breath drains while sprinting
+    public float breathRecoveryRate = 35f; // How fast breath recovers while not sprinting
+    public float breathRecoveryDelay = 1f; // Delay before breath starts recovering after sprinting
+    public float minBreathToSprint = 10f; // Minimum breath needed to start sprinting
+    public bool enableBreathSystem = true; // Toggle to enable/disable the system
+    
     [Header("Fall Detection")]
     public float fallDeathY = -20f; // Y position where player dies from falling
     public float fallDamageThreshold = 15f; // Minimum fall velocity to take damage
@@ -30,11 +38,21 @@ public class PlayerController : MonoBehaviour, IDamageable
     [Header("UI References")]
     public UnityEngine.UI.Slider healthBar; // Optional health bar reference
     public UnityEngine.UI.Text healthText;  // Optional health text reference
+    public UnityEngine.UI.Slider breathBar; // Breath/Stamina bar reference
+    public UnityEngine.UI.Text breathText;  // Optional breath text reference
+    public UnityEngine.UI.Image breathBarFill; // Optional reference to change colors
+    
+    [Header("Breath UI Colors")]
+    public Color breathFullColor = Color.green;
+    public Color breathMidColor = Color.yellow;
+    public Color breathLowColor = Color.red;
+    public Color breathEmptyColor = Color.gray;
     
     [Header("Audio")]
     public AudioClip damageSound;
     public AudioClip deathSound;
     public AudioClip jumpSound;
+    public AudioClip breathingHeavySound; // Optional heavy breathing sound when low on breath
     
     [Header("Debug")]
     public bool showDebugLogs = true;
@@ -44,6 +62,12 @@ public class PlayerController : MonoBehaviour, IDamageable
     private bool isInvincible = false;
     private bool isDead = false;
     private Color originalColor;
+    
+    // Breath/Stamina variables
+    private float currentBreath;
+    private bool canSprint = true;
+    private float lastSprintTime = 0f;
+    private bool isRecoveringBreath = false;
     
     // Fall detection variables
     private float previousY;
@@ -56,6 +80,7 @@ public class PlayerController : MonoBehaviour, IDamageable
     private bool isJumpPressed = false;
     private bool isGrounded;
     private bool isSprinting = false;
+    private bool wantsToSprint = false; // Tracks if player is trying to sprint
 
     private Animator animator;
     private SpriteRenderer spriteRenderer;
@@ -65,9 +90,12 @@ public class PlayerController : MonoBehaviour, IDamageable
     private PlayerInput playerInput;
     private InputAction sprintAction;
 
-    // Events for health changes
+    // Events for health and breath changes
     public System.Action<int, int> OnHealthChanged; // current, max
+    public System.Action<float, float> OnBreathChanged; // current, max
     public System.Action OnPlayerDeath;
+    public System.Action OnBreathDepleted; // When breath runs out
+    public System.Action OnBreathRecovered; // When breath is fully recovered
 
     void Awake()
     {
@@ -93,6 +121,9 @@ public class PlayerController : MonoBehaviour, IDamageable
         // Initialize health
         currentHealth = maxHealth;
         
+        // Initialize breath
+        currentBreath = maxBreath;
+        
         // Initialize fall detection
         previousY = transform.position.y;
         fallStartY = transform.position.y;
@@ -103,6 +134,9 @@ public class PlayerController : MonoBehaviour, IDamageable
             sprintAction.started += OnSprintStarted;
             sprintAction.canceled += OnSprintCanceled;
         }
+        
+        // Initialize UI
+        UpdateBreathUI();
     }
 
     void OnDestroy()
@@ -129,6 +163,9 @@ public class PlayerController : MonoBehaviour, IDamageable
             Die("Fell to death");
             return;
         }
+
+        // Handle breath system
+        HandleBreathSystem();
 
         // Update animator parameters
         bool isMoving = Mathf.Abs(movementInput.x) > 0.01f;
@@ -179,6 +216,113 @@ public class PlayerController : MonoBehaviour, IDamageable
         isJumpPressed = false;
     }
 
+    #region Breath/Stamina System
+
+    private void HandleBreathSystem()
+    {
+        if (!enableBreathSystem) return;
+
+        bool isMoving = Mathf.Abs(movementInput.x) > 0.01f;
+        bool shouldBeSprinting = wantsToSprint && isMoving && isGrounded && canSprint;
+
+        // Check if we can start sprinting
+        if (wantsToSprint && !isSprinting && currentBreath >= minBreathToSprint)
+        {
+            canSprint = true;
+        }
+        else if (currentBreath < minBreathToSprint)
+        {
+            canSprint = false;
+        }
+
+        // Update actual sprinting state
+        isSprinting = shouldBeSprinting;
+
+        // Handle breath consumption and recovery
+        if (isSprinting && isMoving)
+        {
+            // Drain breath while sprinting
+            currentBreath -= breathDrainRate * Time.deltaTime;
+            currentBreath = Mathf.Clamp(currentBreath, 0f, maxBreath);
+            
+            lastSprintTime = Time.time;
+            isRecoveringBreath = false;
+
+            // Stop sprinting if out of breath
+            if (currentBreath <= 0f)
+            {
+                canSprint = false;
+                OnBreathDepleted?.Invoke();
+                
+                if (showDebugLogs)
+                {
+                    Debug.Log("<color=red>Out of breath! Cannot sprint.</color>");
+                }
+            }
+        }
+        else
+        {
+            // Recover breath when not sprinting
+            float timeSinceLastSprint = Time.time - lastSprintTime;
+            
+            if (timeSinceLastSprint >= breathRecoveryDelay)
+            {
+                if (!isRecoveringBreath)
+                {
+                    isRecoveringBreath = true;
+                }
+                
+                float oldBreath = currentBreath;
+                currentBreath += breathRecoveryRate * Time.deltaTime;
+                currentBreath = Mathf.Clamp(currentBreath, 0f, maxBreath);
+                
+                // Check if fully recovered
+                if (oldBreath < maxBreath && currentBreath >= maxBreath)
+                {
+                    OnBreathRecovered?.Invoke();
+                }
+            }
+        }
+
+        // Update UI
+        UpdateBreathUI();
+    }
+
+    private void UpdateBreathUI()
+    {
+        // Update breath bar
+        if (breathBar != null)
+        {
+            breathBar.value = currentBreath / maxBreath;
+        }
+
+        // Update breath text
+        if (breathText != null)
+        {
+            breathText.text = $"Breath: {Mathf.RoundToInt(currentBreath)}/{Mathf.RoundToInt(maxBreath)}";
+        }
+
+        // Update breath bar color based on current breath level
+        if (breathBarFill != null)
+        {
+            float breathPercentage = currentBreath / maxBreath;
+            
+            if (breathPercentage > 0.6f)
+                breathBarFill.color = breathFullColor;
+            else if (breathPercentage > 0.3f)
+                breathBarFill.color = breathMidColor;
+            else if (breathPercentage > 0f)
+                breathBarFill.color = breathLowColor;
+            else
+                breathBarFill.color = breathEmptyColor;
+        }
+
+        // Trigger events
+        OnBreathChanged?.Invoke(currentBreath, maxBreath);
+    }
+
+    #endregion
+
     #region Health System
 
     public void TakeDamage(int damage)
@@ -194,7 +338,6 @@ public class PlayerController : MonoBehaviour, IDamageable
         }
 
         OnHealthChanged?.Invoke(currentHealth, maxHealth);
-    
 
         // Trigger damage animation if available
         if (animator != null)
@@ -275,7 +418,6 @@ public class PlayerController : MonoBehaviour, IDamageable
 
     #endregion
 
-
     #region Input System Callbacks
 
     void OnMove(InputValue value)
@@ -294,21 +436,21 @@ public class PlayerController : MonoBehaviour, IDamageable
     {
         if (isDead) return;
         
-        bool newSprintState = value.isPressed;
+        bool newWantsToSprint = value.isPressed;
         
-        if (isSprinting != newSprintState)
+        if (wantsToSprint != newWantsToSprint)
         {
-            isSprinting = newSprintState;
+            wantsToSprint = newWantsToSprint;
             
             if (showDebugLogs)
             {
-                if (isSprinting)
+                if (wantsToSprint)
                 {
-                    Debug.Log("<color=green>OnSprint Callback: PRESSED</color> - Sprinting state is now TRUE.");
+                    Debug.Log("<color=green>OnSprint Callback: PRESSED</color> - Wants to sprint: TRUE.");
                 }
                 else
                 {
-                    Debug.Log("<color=red>OnSprint Callback: RELEASED</color> - Sprinting state is now FALSE.");
+                    Debug.Log("<color=red>OnSprint Callback: RELEASED</color> - Wants to sprint: FALSE.");
                 }
             }
         }
@@ -339,22 +481,22 @@ public class PlayerController : MonoBehaviour, IDamageable
     {
         if (!isDead)
         {
-            isSprinting = true;
+            wantsToSprint = true;
             
             if (showDebugLogs)
             {
-                Debug.Log("<color=green>Sprint Action: STARTED</color> - Sprinting state is now TRUE.");
+                Debug.Log("<color=green>Sprint Action: STARTED</color> - Wants to sprint: TRUE.");
             }
         }
     }
 
     private void OnSprintCanceled(InputAction.CallbackContext context)
     {
-        isSprinting = false;
+        wantsToSprint = false;
         
         if (showDebugLogs)
         {
-            Debug.Log("<color=red>Sprint Action: CANCELED</color> - Sprinting state is now FALSE.");
+            Debug.Log("<color=red>Sprint Action: CANCELED</color> - Wants to sprint: FALSE.");
         }
     }
 
@@ -367,6 +509,13 @@ public class PlayerController : MonoBehaviour, IDamageable
     public int GetMaxHealth() => maxHealth;
     public float GetHealthPercentage() => (float)currentHealth / maxHealth;
     
+    // Breath system getters
+    public float GetCurrentBreath() => currentBreath;
+    public float GetMaxBreath() => maxBreath;
+    public float GetBreathPercentage() => currentBreath / maxBreath;
+    public bool CanSprint() => canSprint && currentBreath >= minBreathToSprint;
+    public bool IsRecoveringBreath() => isRecoveringBreath;
+    
     public void SetMaxHealth(int newMaxHealth)
     {
         maxHealth = newMaxHealth;
@@ -376,6 +525,32 @@ public class PlayerController : MonoBehaviour, IDamageable
     public void FullHeal()
     {
         Heal(maxHealth);
+    }
+    
+    // Breath system methods
+    public void RestoreBreath(float amount)
+    {
+        currentBreath += amount;
+        currentBreath = Mathf.Clamp(currentBreath, 0f, maxBreath);
+        UpdateBreathUI();
+    }
+    
+    public void FullRestoreBreath()
+    {
+        currentBreath = maxBreath;
+        canSprint = true;
+        UpdateBreathUI();
+    }
+    
+    public void DrainBreath(float amount)
+    {
+        currentBreath -= amount;
+        currentBreath = Mathf.Clamp(currentBreath, 0f, maxBreath);
+        if (currentBreath < minBreathToSprint)
+        {
+            canSprint = false;
+        }
+        UpdateBreathUI();
     }
 
     #endregion
@@ -388,11 +563,13 @@ public class PlayerController : MonoBehaviour, IDamageable
         if (Time.frameCount % 60 == 0 && showDebugLogs) // Every second at 60 FPS
         {
             Debug.Log($"Player State - Moving: {Mathf.Abs(movementInput.x) > 0.01f}, " +
-                     $"Sprinting: {isSprinting}, " +
+                     $"Wants Sprint: {wantsToSprint}, " +
+                     $"Actually Sprinting: {isSprinting}, " +
+                     $"Can Sprint: {canSprint}, " +
                      $"Grounded: {isGrounded}, " +
                      $"Health: {currentHealth}/{maxHealth}, " +
-                     $"Falling: {isFalling}, " +
-                     $"Current Speed: {(isSprinting && isGrounded ? runSpeed : moveSpeed)}");
+                     $"Breath: {currentBreath:F1}/{maxBreath}, " +
+                     $"Recovering: {isRecoveringBreath}");
         }
     }
 
@@ -401,8 +578,8 @@ public class PlayerController : MonoBehaviour, IDamageable
     {
         if (!isDead)
         {
-            isSprinting = !isSprinting;
-            Debug.Log($"Sprint manually toggled to: {isSprinting}");
+            wantsToSprint = !wantsToSprint;
+            Debug.Log($"Sprint manually toggled to: {wantsToSprint}");
         }
     }
 
@@ -422,6 +599,24 @@ public class PlayerController : MonoBehaviour, IDamageable
     public void DebugKill()
     {
         TakeDamage(currentHealth);
+    }
+    
+    [ContextMenu("Drain Breath (25)")]
+    public void DebugDrainBreath()
+    {
+        DrainBreath(25f);
+    }
+    
+    [ContextMenu("Restore Breath (25)")]
+    public void DebugRestoreBreath()
+    {
+        RestoreBreath(25f);
+    }
+    
+    [ContextMenu("Full Restore Breath")]
+    public void DebugFullRestoreBreath()
+    {
+        FullRestoreBreath();
     }
 
     public bool IsCurrentlySprinting()
